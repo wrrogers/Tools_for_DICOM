@@ -325,12 +325,14 @@ def processLungs(fpath, ipath = None, file_type = 'png'):
     flag = 0
     cut_num = 0
     cut_step = 2
+    print("Make copy")
     bw0 = np.copy(bw)
+    print("Copied")
     while flag == 0 and cut_num < bw.shape[0]:
         bw = np.copy(bw0)
         bw, flag = all_slice_analysis(bw, meta['Spacing'], cut_num=cut_num, vol_limit=[0.68,7.5])
         cut_num = cut_num + cut_step
-
+    print("All slices analysed")
     bw = fill_hole(bw)
     print("... holes filled in mask.")
     bw1, bw2, bw = two_lung_only(bw, meta['Spacing'])
@@ -539,11 +541,105 @@ def cubeEm(img, points, rad):
     cubes = np.asarray(cubes)        
     return cubes
 
+
+###############################################################################
+
+# Slower, doesn't us multiprocessing
+def load_scan(path):
+    slices = [dicom.read_file(path + '/' + s) for s in os.listdir(path)]
+    slices.sort(key = lambda x: int(x.InstanceNumber))
+    try:
+        slice_thickness = np.abs(slices[0].ImagePositionPatient[2] - slices[1].ImagePositionPatient[2])
+    except:
+        slice_thickness = np.abs(slices[0].SliceLocation - slices[1].SliceLocation)
+        
+    for s in slices:
+        s.SliceThickness = slice_thickness
+        
+    return slices
+
+def get_pixels_hu(scans):
+    image = np.stack([s.pixel_array for s in scans])
+    # Convert to int16 (from sometimes int16), 
+    # should be possible as values should always be low enough (<32k)
+    image = image.astype(np.int16)
+
+    # Set outside-of-scan pixels to 1
+    # The intercept is usually -1024, so air is approximately 0
+    image[image == -2000] = 0
+    
+    # Convert to Hounsfield units (HU)
+    intercept = scans[0].RescaleIntercept
+    slope = scans[0].RescaleSlope
+    
+    if slope != 1:
+        image = slope * image.astype(np.float64)
+        image = image.astype(np.int16)
+        
+    image += np.int16(intercept)
+    
+    return np.array(image, dtype=np.int16)
+
+# Retrieves the contours from a given .dcm file
+def get_contours(seq,z):
+    #ctrs[0]
+    #len(ctrs) #Length of 1, all data is in [0]
+    #len(ctrs[0].ContourSequence) #The squence is 21 Deep
+    #len(ctrs[0].ContourSequence[0].ContourData) #first sequence has 180 numbers
+    # The sequence has 3 numbers reating, (x, y, z?)
+    #print("Getting countours for sequence", z+1)
+    ctrs = np.array(seq.ContourData)
+    ctrs3d = []
+    for c in range(1,int(len(ctrs)/3)+1):
+        ctrs3d.append(list(ctrs[c*3-3:c*3]))
+        
+    ctrs3d = np.array(ctrs3d)
+    # Lets remove the z postion
+    #ctrs2d = ctrs3d[:,:2]
+    return ctrs3d
+
+# Retrieves all contours from all .dcm files in a directory
+def get_all_contours(path):
+    ds = dicom.read_file(os.path.join(path), force=True)
+    ctrs = ds.ROIContourSequence
+    ctrs_stack = []
+    #print(ctrs)
+    #print("There a total of", len(ctrs[0].ContourSequence),"slices of contours")
+    for z, c in enumerate(ctrs[0].ContourSequence):
+        #print("Getting contours for z number:", z)
+        ctrs_slice = get_contours(c,z)
+        ctrs_stack.append(ctrs_slice)
+
+    return ctrs_stack
+
+# Passes images and contours and returns 3d masked images
+def maskit(images, ctrs2d):
+    masked3d = []
+    for img, c in zip(images, ctrs2d):
+        #print("img",img.shape)
+        dst = np.zeros(shape = (512, 512), dtype = 'float32') # An empty mask for CV2 to compute the normalization
+        normalized = cv2.normalize(img,dst,0.0,1.0,cv2.NORM_MINMAX,cv2.CV_32FC1)
+        #scaler = MinMaxScaler()
+        #normalized = scaler.fit_transform(img)
+        #print("new",normalized.shape)
+        mask = np.zeros((512, 512), dtype=np.int8) # Create an empty mask
+        polys = np.array([c] , np.int16) # Convert all the floats to ints (for the sake of plotting)
+        # Use cv2 to create the mask using the contours
+        for i in polys.tolist():
+            cv2.fillConvexPoly(mask, np.array(i), 1)
+    
+        masked = normalized * mask # Done using a simple multiplication (ones don't change, 0s turn black)
+        masked3d.append(masked)
+    masked3d = np.array([masked3d])
+    masked3d = masked3d[0]
+    return masked3d
+
 ############################## MAIN ###########################################
 
 
-
+'''
 if __name__ == "__main__":
+    
     spath = r'G:\Data'
     fpath = r'D:\Data\MILDBL_ANON'
     #true_pos = [[130, 291, 276], [380, 218, 235], [104, 238, 198], [440, 218, 130]]
@@ -576,6 +672,6 @@ if __name__ == "__main__":
     #cubes = cubeEm(img, points, 25)
     
     #plt.imshow(cubes[0][25,:,:])
-    
+'''
     
     
